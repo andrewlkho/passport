@@ -29,6 +29,36 @@ def z_get_userid(token):
     return result["userID"]
 
 
+def z_api_write(token, url, data):
+    """Write the supplied data to the zotero API.
+
+    The data should be in the format of a list of dictionaries which is
+    converted into the JSON expected by the Zotero API.  It takes care of
+    uploading in batches of fifty.  It returns the "success" dictionary where
+    the key is the list index corresponding to that item, and the value is
+    the zotero key returned.
+    """
+
+    data_chunks = [data[i:i+50] for i in xrange(0, len(data), 50)]
+    success = {}
+    for chunk_key, chunk in enumerate(data_chunks):
+        req = urllib2.Request(url, json.dumps(chunk))
+        req.add_header("Zotero-API-Key", token)
+        req.add_header("Zotero-API-Version", "3")
+        req.add_header("Content-Type", "application/json")
+        try:
+            res = urllib2.urlopen(req)
+        except urllib2.HTTPError as e:
+            sys.exit("Error: received HTTP %s" % e.code)
+        else:
+            # if len(json.load(res)["failed"]) > 0:
+            #     sys.exit("Error: failed to write")
+            res_success = json.load(res)["success"]
+            for k in res_success.iterkeys():
+                success[(chunk_key * 50) + int(k)] = res_success[k]
+    return success
+
+
 def open_papersdb():
     """Return the connection cursor to the papers sqlite library"""
     f = os.path.expanduser("~/Library/Preferences/com.mekentosj.papers3.plist")
@@ -70,25 +100,26 @@ def z_recreate_collections(token, userid, papersdb_cursor):
         new_tld = "_".join(["passport-import", now])
 
     # Create a passport import collection and record the zotero ID
-    lib_data = json.dumps([{"name": new_tld,
-                            "parentCollection": False}])
-    lib_url = "https://api.zotero.org/users/%s/collections" % userid
-    lib_req = urllib2.Request(lib_url, lib_data)
-    lib_req.add_header("Zotero-API-key", token)
-    lib_req.add_header("Zotero-API-Version", "3")
-    lib_req.add_header("Content-Type", "application/json")
-    lib_res = json.load(urllib2.urlopen(lib_req))
-    if not "success" in lib_res:
+    lib_data = [{"name": new_tld,
+                "parentCollection": False}]
+    lib_res = z_api_write(
+            token,
+            "https://api.zotero.org/users/%s/collections" % userid,
+            lib_data
+            )
+    try:
+        tld_key = lib_res[0]
+    except KeyError:
         sys.exit("Could not create a new collection for import")
     p_tld_sql = ("SELECT uuid FROM Collection WHERE editable = 0 "
                 "AND name = 'COLLECTIONS';")
     papersdb_cursor.execute(p_tld_sql)
     p_tld_uuid = papersdb_cursor.fetchone()[0]
-    collection_map = {p_tld_uuid: lib_res["success"]["0"]}
+    collection_map = {p_tld_uuid: tld_key}
     # For ease of later referencing in z_recreate_items for orphaned items, we
     # also insert it into the map with key "tld"
-    collection_map["tld"] = lib_res["success"]["0"]
-    
+    collection_map["tld"] = tld_key
+
     # Get a list of all collections in papers
     p_sql = ("SELECT uuid, name, parent FROM Collection WHERE editable=1")
     p_collections = {}
@@ -98,18 +129,16 @@ def z_recreate_collections(token, userid, papersdb_cursor):
     # Create all level 1 collections (i.e. not sub-collections)
     for uuid, v in p_collections.copy().iteritems():
         if v["parent"] == p_tld_uuid:
-            level1_data = json.dumps([{
+            level1_data = [{
                 "name": v["name"],
                 "parentCollection": collection_map[p_tld_uuid]
-                }])
-            level1_url = "https://api.zotero.org/users/%s/collections" \
-                         % userid
-            level1_req = urllib2.Request(level1_url, level1_data)
-            level1_req.add_header("Zotero-API-Key", token)
-            level1_req.add_header("Zotero-API-Version", "3")
-            level1_req.add_header("Content-Type", "application/json")
-            level1_res = urllib2.urlopen(level1_req)
-            collection_map[uuid] = json.load(level1_res)["success"]["0"]
+                }]
+            level1_res = z_api_write(
+                    token,
+                    "https://api.zotero.org/users/%s/collections" % userid,
+                    level1_data
+                    )
+            collection_map[uuid] = level1_res[0]
             del p_collections[uuid]
 
     # Create all level >1 collections by looping through 
@@ -119,18 +148,16 @@ def z_recreate_collections(token, userid, papersdb_cursor):
             to_add = {k: v for k, v in p_collections.items()
                                     if v["parent"] == p_uuid}
             for uuid, v in to_add.iteritems():
-                add_data = json.dumps([{
+                add_data = [{
                     "name": v["name"],
                     "parentCollection": collection_map[v["parent"]]
-                    }])
-                add_url = "https://api.zotero.org/users/%s/collections" \
-                          % userid
-                add_req = urllib2.Request(add_url, add_data)
-                add_req.add_header("Zotero-API-Key", token)
-                add_req.add_header("Zotero-API-Version", "3")
-                add_req.add_header("Content-Type", "application/json")
-                add_res = urllib2.urlopen(add_req)
-                collection_map[uuid] = json.load(add_res)["success"]["0"]
+                    }]
+                add_res = z_api_write(
+                        token,
+                        "https://api.zotero.org/users/%s/collections" % userid,
+                        add_data
+                        )
+                collection_map[uuid] = add_res[0]
                 del p_collections[uuid]
 
     return collection_map
@@ -322,56 +349,39 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map):
         # Add this item to the `import_items` list for importing
         import_items.append(jsondict)
 
-    # Upload items in batches of 50
-    import_items_chunks = [import_items[i:i+50]
-                           for i in xrange(0, len(import_items), 50)]
+    # Upload items
     item_map = {}
-    for chunk in import_items_chunks:
-        item_map_chunk = {}
-        i = 0
-        for item in chunk:
-            item_map_chunk[i] = item["papers_uuid"]
-            del chunk[i]["papers_uuid"]
-            i += 1
-
-        items_url = "https://api.zotero.org/users/%s/items" % userid
-        items_req = urllib2.Request(items_url, json.dumps(chunk))
-        items_req.add_header("Zotero-API-Key", token)
-        items_req.add_header("Zotero-API-Version", "3")
-        items_req.add_header("Content-Type", "application/json")
-        items_res = urllib2.urlopen(items_req)
-
-        items_success = json.load(items_res)["success"]
-        for x in items_success:
-            item_map[item_map_chunk[int(x)]] = items_success[x]
+    item_map_uuids = {}
+    for i, item in enumerate(import_items):
+        item_map_uuids[i] = item["papers_uuid"]
+        del import_items[i]["papers_uuid"]
+    item_success = z_api_write(
+            token,
+            "https://api.zotero.org/users/%s/items" % userid,
+            import_items
+            )
+    for x in item_success:
+        item_map[item_map_uuids[int(x)]] = item_success[x]
 
     # Upload notes
-    for note_key, note in enumerate(import_notes):
-        import_notes[note_key]["parentItem"] = item_map[note["papers_uuid"]]
-        del import_notes[note_key]["papers_uuid"]
-    import_notes_chunks = [import_notes[i:i+50]
-                           for i in xrange(0, len(import_notes), 50)]
-    for chunk in import_notes_chunks:
-        notes_url = "https://api.zotero.org/users/%s/items" % userid
-        notes_req = urllib2.Request(notes_url, json.dumps(chunk))
-        notes_req.add_header("Zotero-API-Key", token)
-        notes_req.add_header("Zotero-API-Version", "3")
-        notes_req.add_header("Content-Type", "application/json")
-        urllib2.urlopen(notes_req)
+    for i, note in enumerate(import_notes):
+        import_notes[i]["parentItem"] = item_map[note["papers_uuid"]]
+        del import_notes[i]["papers_uuid"]
+    z_api_write(
+            token,
+            "https://api.zotero.org/users/%s/items" % userid,
+            import_notes
+            )
 
     # Upload PubMed entries
-    for pubmed_key, pubmed in enumerate(import_pubmed):
-        import_pubmed[pubmed_key]["parentItem"] = item_map[pubmed["papers_uuid"]]
-        del import_pubmed[pubmed_key]["papers_uuid"]
-    import_pubmed_chunks = [import_pubmed[i:i+50]
-                            for i in xrange(0, len(import_pubmed), 50)]
-    for chunk in import_pubmed_chunks:
-        pubmed_url = "https://api.zotero.org/users/%s/items" % userid
-        pubmed_req = urllib2.Request(pubmed_url, json.dumps(chunk))
-        pubmed_req.add_header("Zotero-API-Key", token)
-        pubmed_req.add_header("Zotero-API-Version", "3")
-        pubmed_req.add_header("Content-Type", "application/json")
-        urllib2.urlopen(pubmed_req)
+    for i, pubmed in enumerate(import_pubmed):
+        import_pubmed[i]["parentItem"] = item_map[pubmed["papers_uuid"]]
+        del import_pubmed[i]["papers_uuid"]
+    z_api_write(
+            token,
+            "https://api.zotero.org/users/%s/items" % userid,
+            import_pubmed
+            )
 
     return item_map
 
