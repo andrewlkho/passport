@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 
 import argparse
+import ConfigParser
 import datetime
 import os
 import json
 import plistlib
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -386,6 +388,77 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map):
     return item_map
 
 
+def z_recreate_pdfs(token, userid, papersdb_cursor, item_map):
+    """Copy PDFs to zotero local storage and upload info to API"""
+    # Get path to zotero data directory
+    config = ConfigParser.RawConfigParser()
+    profilesini = config.read(os.path.expanduser(
+        "~/Library/Application Support/Zotero/profiles.ini"
+        ))
+    prefsjs = open(os.path.expanduser("/".join([
+        "~/Library/Application Support/Zotero",
+        config.get("Profile0", "Path"),
+        "prefs.js"
+        ])))
+    for line in prefsjs:
+        match = re.search(
+                r'user_pref\("extensions\.zotero\.dataDir", "([^"]+)"\);',
+                line
+                )
+        if match:
+            datadir = match.group(1)
+
+    # Generate "pdfs", a list where each item is a dictionary containing
+    # a PDF path, a zotero key and the date the item was added
+    f = os.path.expanduser("~/Library/Preferences/com.mekentosj.papers3.plist")
+    plist = subprocess.check_output(["plutil", "-convert", "xml1", "-o", "-", f])
+    prefix = plistlib.readPlistFromString(plist)[
+                 "mt_papers3_full_library_location_shared"
+                 ]
+    pdfs_sql = ("SELECT path, object_id, created_at FROM PDF "
+                "WHERE type = 0 "
+                "AND mime_type = 'application/pdf';")
+    pdfs_res = papersdb_cursor.execute(pdfs_sql)
+    pdfs = []
+    for pdfs_row in pdfs_res.fetchall():
+        path_abs = "/".join([prefix, pdfs_row["path"]])
+        if pdfs_row["object_id"] in item_map:
+            if os.path.isfile(path_abs):
+                d = datetime.datetime.utcfromtimestamp(pdfs_row["created_at"])
+                d = "".join([d.replace(microsecond=0).isoformat(), "Z"])
+                pdfs.append({
+                        "path": path_abs,
+                        "parentItem": item_map[pdfs_row["object_id"]],
+                        "dateAdded": d
+                        })
+
+    # Create import_pdfs and upload to the zotero API
+    import_pdfs = []
+    for pdf in pdfs:
+        import_pdfs.append({
+            "itemType": "attachment",
+            "linkMode": "imported_file",
+            "title": os.path.basename(pdf["path"]),
+            "contentType": "application/pdf",
+            "filename": os.path.basename(pdf["path"]),
+            "tags": [],
+            "relations": {},
+            "dateAdded": pdf["dateAdded"],
+            "parentItem": pdf["parentItem"]
+            })
+    pdfs_success = z_api_write(
+            token,
+            "https://api.zotero.org/users/%s/items" % userid,
+            import_pdfs
+            )
+
+    # Copy PDFs to the zotero data directory
+    for i in pdfs_success:
+        dest = "/".join([datadir, "storage", pdfs_success[i]])
+        os.mkdir(dest)
+        shutil.copy(pdfs[i]["path"], dest)
+
+
 def main():
     description = """
     Import a Papers 3 library to Zotero.  For more information see:
@@ -399,7 +472,9 @@ def main():
     papersdb_cursor = open_papersdb()
     userid = z_get_userid(args.token)
     collection_map = z_recreate_collections(args.token, userid, papersdb_cursor)
-    z_recreate_items(args.token, userid, papersdb_cursor, collection_map)
+    item_map = z_recreate_items(args.token, userid, papersdb_cursor,
+            collection_map)
+    z_recreate_pdfs(args.token, userid, papersdb_cursor, item_map)
 
 
 if __name__ == "__main__":
