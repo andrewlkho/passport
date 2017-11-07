@@ -129,38 +129,46 @@ def z_recreate_collections(token, userid, papersdb_cursor):
         p_collections[row[0]] = {"name": row[1], "parent": row[2]}
 
     # Create all level 1 collections (i.e. not sub-collections)
+    level1_data = []
+    level1_uuids = []
     for uuid, v in p_collections.copy().iteritems():
         if v["parent"] == p_tld_uuid:
-            level1_data = [{
+            level1_data.append({
                 "name": v["name"],
                 "parentCollection": collection_map[p_tld_uuid]
-                }]
-            level1_res = z_api_write(
-                    token,
-                    "https://api.zotero.org/users/%s/collections" % userid,
-                    level1_data
-                    )
-            collection_map[uuid] = level1_res[0]
+                })
+            level1_uuids.append(uuid)
             del p_collections[uuid]
+    level1_success = z_api_write(
+            token,
+            "https://api.zotero.org/users/%s/collections" % userid,
+            level1_data
+            )
+    for x in level1_success:
+        collection_map[level1_uuids[int(x)]] = level1_success[x]
 
     # Create all level >1 collections by looping through 
     # collection_map and searching p_collections for children
     while len(p_collections) > 0:
+        levelgt1_data = []
+        levelgt1_uuids = []
         for p_uuid in collection_map.copy().iterkeys():
             to_add = {k: v for k, v in p_collections.items()
                                     if v["parent"] == p_uuid}
             for uuid, v in to_add.iteritems():
-                add_data = [{
+                levelgt1_data.append({
                     "name": v["name"],
                     "parentCollection": collection_map[v["parent"]]
-                    }]
-                add_res = z_api_write(
-                        token,
-                        "https://api.zotero.org/users/%s/collections" % userid,
-                        add_data
-                        )
-                collection_map[uuid] = add_res[0]
+                    })
+                levelgt1_uuids.append(uuid)
                 del p_collections[uuid]
+        levelgt1_success = z_api_write(
+                token,
+                "https://api.zotero.org/users/%s/collections" % userid,
+                levelgt1_data
+                )
+        for x in levelgt1_success:
+            collection_map[levelgt1_uuids[int(x)]] = levelgt1_success[x]
 
     return collection_map
 
