@@ -192,7 +192,7 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map):
                  "FROM Publication a, Publication b "
                  "WHERE a.bundle = b.uuid "
                  "AND a.type >= 0 "
-                 "AND a.privacy_level = 0 LIMIT 500")
+                 "AND a.privacy_level = 0;")
     items_res = papersdb_cursor.execute(items_sql)
     import_items = []
     import_notes = []
