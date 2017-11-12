@@ -19,6 +19,7 @@ import xml.etree.ElementTree
 
 def z_get_userid(token):
     """Validate the Zotero API token and return the user ID"""
+    print "Retrieving user information from the Zotero API..."
     req = urllib2.Request("https://api.zotero.org/keys/%s" % token)
     req.add_header("Zotero-API-Version", "3")
     try:
@@ -64,6 +65,7 @@ def z_api_write(token, url, data):
 
 def open_papersdb():
     """Return the connection cursor to the papers sqlite library"""
+    print "Opening the Papers 3 library database..."
     f = os.path.expanduser("~/Library/Preferences/com.mekentosj.papers3.plist")
 
     # Unfortunately, plistlib does not handle binary plists so the plutil
@@ -87,6 +89,7 @@ def z_recreate_collections(token, userid, papersdb_cursor):
     to the Zotero API key.
     """
 
+    print "Creating collections..."
     # List all top-level collections and generate a unique name for the
     # library import
     tlds_url = "https://api.zotero.org/users/%s/collections/top" % userid
@@ -176,6 +179,7 @@ def z_recreate_collections(token, userid, papersdb_cursor):
 
 def z_recreate_items(token, userid, papersdb_cursor, collection_map, pubmed_cleanup):
     """Import items from papers into the Zotero API"""
+    print "Reading items from Papers..."
     items_sql = ("SELECT "
                  "a.uuid AS uuid, "
                  "a.title AS title, "
@@ -345,6 +349,7 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map, pubmed_clea
 
     # If requested, cleanup import_items by querying the PubMed database
     if pubmed_cleanup:
+        print "Passing %s item(s) through PubMed" % len(import_items)
         import_items = pmclean(import_items, pubmed_cleanup)
 
     # Loop through import_items, replace the "pmid" and "pmcid" keys with
@@ -380,6 +385,7 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map, pubmed_clea
             import_items[i]["extra"] = "\n".join(extra)
 
     # Upload items
+    print "Uploading %s item(s) to Zotero..." % len(import_items)
     item_map = {}
     item_map_uuids = {}
     for i, item in enumerate(import_items):
@@ -394,6 +400,7 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map, pubmed_clea
         item_map[item_map_uuids[int(x)]] = item_success[x]
 
     # Upload notes
+    print "Uploading %s note(s) to Zotero..." % len(import_notes)
     for i, note in enumerate(import_notes):
         import_notes[i]["parentItem"] = item_map[note["papers_uuid"]]
         del import_notes[i]["papers_uuid"]
@@ -404,6 +411,7 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map, pubmed_clea
             )
 
     # Upload PubMed entries
+    print "Uploading %s PubMed entries to Zotero..." % len(import_pubmed)
     for i, pubmed in enumerate(import_pubmed):
         import_pubmed[i]["parentItem"] = item_map[pubmed["papers_uuid"]]
         del import_pubmed[i]["papers_uuid"]
@@ -418,6 +426,7 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map, pubmed_clea
 
 def z_recreate_pdfs(token, userid, papersdb_cursor, item_map):
     """Copy PDFs to zotero local storage and upload info to API"""
+    print "Retrieving information on PDFs from Papers..."
     # Get path to zotero data directory
     config = ConfigParser.RawConfigParser()
     profilesini = config.read(os.path.expanduser(
@@ -461,6 +470,7 @@ def z_recreate_pdfs(token, userid, papersdb_cursor, item_map):
                         })
 
     # Create import_pdfs and upload to the zotero API
+    print "Associating PDFs with entries in Zotero..."
     import_pdfs = []
     for pdf in pdfs:
         import_pdfs.append({
@@ -481,6 +491,7 @@ def z_recreate_pdfs(token, userid, papersdb_cursor, item_map):
             )
 
     # Copy PDFs to the zotero data directory
+    print "Copying PDFs to the local Zotero data storage directory..."
     for i in pdfs_success:
         dest = "/".join([datadir, "storage", pdfs_success[i]])
         os.mkdir(dest)
