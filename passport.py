@@ -12,7 +12,9 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib
 import urllib2
+import xml.etree.ElementTree
 
 
 def z_get_userid(token):
@@ -52,12 +54,11 @@ def z_api_write(token, url, data):
             res = urllib2.urlopen(req)
         except urllib2.HTTPError as e:
             sys.exit("Error: received HTTP %s" % e.code)
-        else:
-            # if len(json.load(res)["failed"]) > 0:
-            #     sys.exit("Error: failed to write")
-            res_success = json.load(res)["success"]
-            for k in res_success.iterkeys():
-                success[(chunk_key * 50) + int(k)] = res_success[k]
+        res_json = json.load(res)
+        if len(res_json["failed"]) > 0:
+            sys.exit("Error: failed to write")
+        for k in res_json["success"].iterkeys():
+            success[(chunk_key * 50) + int(k)] = res_json["success"][k]
     return success
 
 
@@ -173,7 +174,7 @@ def z_recreate_collections(token, userid, papersdb_cursor):
     return collection_map
 
 
-def z_recreate_items(token, userid, papersdb_cursor, collection_map):
+def z_recreate_items(token, userid, papersdb_cursor, collection_map, pubmed_cleanup):
     """Import items from papers into the Zotero API"""
     items_sql = ("SELECT "
                  "a.uuid AS uuid, "
@@ -196,7 +197,6 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map):
     items_res = papersdb_cursor.execute(items_sql)
     import_items = []
     import_notes = []
-    import_pubmed = []
     for item in items_res.fetchall():
         jsondict = {"itemType": "journalArticle"}
 
@@ -274,39 +274,23 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map):
         dateAdded = "".join([dateAdded.replace(microsecond=0).isoformat(), "Z"])
         jsondict["dateAdded"] = dateAdded
 
-        # PMID / PMC
-        pubmed_sql = ("SELECT remote_id, source_id from SyncEvent "
+        # For now, just insert "pmid" and "pmcid" keys in jsondict.  Later
+        # (after pubmed_cleanup has been run), these are removed and replaced
+        # by:
+        # - jsondict["libraryCatalog"] = "PubMed"
+        # - jsondict["extra"] = "PMCID: ... \n PMID: ...." as needed
+        # - a "PubMed entry" attachment
+        pubmed_sql = ("SELECT remote_id, source_id FROM SyncEvent "
                       "WHERE device_id = ? "
                       "AND subtype = 0 "
                       "AND (source_id = 'gov.nih.nlm.ncbi.pubmed' "
                       "OR source_id = 'gov.nih.nlm.ncbi.pmc');")
         pubmed_res = papersdb_cursor.execute(pubmed_sql, (item["uuid"],))
-        extra = []
         for pubmed_row in pubmed_res.fetchall():
             if pubmed_row["source_id"] == "gov.nih.nlm.ncbi.pubmed":
-                extra.append("PMID: %s" % pubmed_row["remote_id"])
-
-                # PubMed entry attachment
-                import_pubmed.append({
-                    "itemType": "attachment",
-                    "linkMode": "linked_url",
-                    "title": "PubMed entry",
-                    "accessDate": dateAdded,
-                    "url": "http://www.ncbi.nlm.nih.gov/pubmed/%s" %
-                        pubmed_row["remote_id"],
-                    "note": "",
-                    "contentType": "text/html",
-                    "tags": [],
-                    "collections": [],
-                    "relations": {},
-                    "charset": "",
-                    "papers_uuid": item["uuid"]
-                    })
+                jsondict["pmid"] = pubmed_row["remote_id"]
             elif pubmed_row["source_id"] == "gov.nih.nlm.ncbi.pmc":
-                extra.append("PMCID: %s" % pubmed_row["remote_id"])
-        if len(extra) > 0:
-            jsondict["libraryCatalog"] = "PubMed"
-            jsondict["extra"] = "\n".join(extra)
+                jsondict["pmcid"] = pubmed_row["remote_id"]
 
         # Tags
         tags_sql = ("SELECT Keyword.name FROM KeywordItem "
@@ -358,6 +342,42 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map):
         
         # Add this item to the `import_items` list for importing
         import_items.append(jsondict)
+
+    # If requested, cleanup import_items by querying the PubMed database
+    if pubmed_cleanup:
+        import_items = pmclean(import_items, pubmed_cleanup)
+
+    # Loop through import_items, replace the "pmid" and "pmcid" keys with
+    # the appropriate entries then create import_pubmed (which has the extra
+    # key "papers_uuid" to be replaced with the zotero key to the parent item
+    # once we have item_map).
+    import_pubmed = []
+    for i, item in enumerate(import_items):
+        if item.viewkeys() & {"pmid", "pmcid"}:
+            extra = []
+            if "pmid" in item:
+                extra.append("PMID: %s" % item["pmid"])
+                import_pubmed.append({
+                    "itemType": "attachment",
+                    "linkMode": "linked_url",
+                    "title": "PubMed entry",
+                    "accessDate": import_items[i]["dateAdded"],
+                    "url": "http://www.ncbi.nlm.nih.gov/pubmed/%s" %
+                        item["pmid"],
+                    "note": "",
+                    "contentType": "text/html",
+                    "tags": [],
+                    "collections": [],
+                    "relations": {},
+                    "charset": "",
+                    "papers_uuid": item["papers_uuid"]
+                    })
+                del import_items[i]["pmid"]
+            if "pmcid" in item:
+                extra.append("PMCID: %s" % item["pmcid"])
+                del import_items[i]["pmcid"]
+            import_items[i]["libraryCatalog"] = "PubMed"
+            import_items[i]["extra"] = "\n".join(extra)
 
     # Upload items
     item_map = {}
@@ -467,6 +487,113 @@ def z_recreate_pdfs(token, userid, papersdb_cursor, item_map):
         shutil.copy(pdfs[i]["path"], dest)
 
 
+def pmclean(import_items, pubmed_cleanup):
+    """Clean entries by querying the PubMed database"""
+    last_sent = datetime.datetime.now()
+
+    # See if we can retrieve a PMID for items with a DOI but no PMID
+    for i, item in enumerate(import_items):
+        if "doi" in item and "pmid" not in item:
+            # Crude way of limiting requests to a third of a second between the
+            current = datetime.datetime.now()
+            time_passed = current - last_sent
+            if time_passed.total_seconds() < (1.0/3):
+                time.sleep((1.0/3) - time_passed.total_seconds())
+            last_sent = datetime.datetime.now()
+
+            esearch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+            esearch_params = urllib.urlencode({
+                "db": "pubmed",
+                "term": '"%s"[AID]' % item["doi"]
+                })
+            esearch_req = urllib2.Request(esearch_url, esearch_params)
+            esearch_res = urllib2.urlopen(esearch_req)
+            esearch_et = xml.etree.ElementTree.parse(esearch_res)
+            if esearch_et.find("Count").text == "1":
+                import_items[i]["pmid"] = esearch_et.find("IdList").find("Id").text
+
+    # See if we can retrieve a PMID for items with a PMCID but no PMID
+    for i, item in enumerate(import_items):
+        if "pmcid" in item and "pmid" not in item:
+            current = datetime.datetime.now()
+            time_passed = current - last_sent
+            if time_passed.total_seconds() < (1.0/3):
+                time.sleep((1.0/3) - time_passed.total_seconds())
+            last_sent = datetime.datetime.now()
+
+            esearch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+            esearch_params = urllib.urlencode({
+                "db": "pubmed",
+                "term": item["pmcid"]
+                })
+            esearch_req = urllib2.Request(esearch_url, esearch_params)
+            esearch_res = urllib2.urlopen(esearch_req)
+            esearch_et = xml.etree.ElementTree.parse(esearch_res)
+            if esearch_et.find("Count").text == "1":
+                import_items[i]["pmid"] = esearch_et.find("IdList").find("Id").text
+
+    id_list = []
+    # TODO: Iterate retstart to enable more than 10000 articles to be retrieved
+    if len(id_list) > 10000:
+        sys.exit("Error: more than 10000 articles would be sent to PubMed EFetch")
+    for item in import_items:
+        if "pmid" in item:
+            id_list.append(item["pmid"])
+    efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    efetch_params = urllib.urlencode({
+        "db": "pubmed",
+        "id": ",".join(id_list),
+        "rettype": "abstract",
+        "retmode": "xml"
+        })
+    efetch_req = urllib2.Request(efetch_url, efetch_params)
+    efetch_res = urllib2.urlopen(efetch_req)
+    efetch_et = xml.etree.ElementTree.parse(efetch_res)
+    for article in efetch_et.iter("PubmedArticle"):
+        # Replace the doi/PMCID and also set import_i, the list index for the
+        # current article in import_items
+        pmid = None
+        doi = None
+        pmcid = None
+        import_i = None
+        for id in article.find("PubmedData").find("ArticleIdList"):
+            if id.attrib.get("IdType") == "pubmed":
+                pmid = id.text
+            elif id.attrib.get("IdType") == "doi":
+                doi = id.text
+            elif id.attrib.get("IdType") == "pmc":
+                pmcid = id.text
+        for i, item in enumerate(import_items):
+            if "pmid" in item and item["pmid"] == pmid:
+                import_i = i
+        if import_i:
+            if doi:
+                import_items[import_i]["doi"] = doi
+            if pmcid:
+                import_items[import_i]["pmcid"] = pmcid
+
+            if "journal" in pubmed_cleanup:
+                try:
+                    import_items[import_i]["publicationTitle"] = article.find(
+                            "MedlineCitation").find("Article").find("Journal").find(
+                                    "Title").text
+                    import_items[import_i]["journalAbbreviation"] = article.find(
+                            "MedlineCitation").find("Article").find("Journal").find(
+                                    "ISOAbbreviation").text
+                except AttributeError:
+                    pass
+
+            if "abstract" in pubmed_cleanup:
+                try:
+                    import_items[import_i]["abstractNote"] = article.find(
+                            "MedlineCitation").find("Article").find(
+                                    "Abstract").find("AbstractText").text
+                except AttributeError:
+                    pass
+
+    return import_items
+
+
 def main():
     description = """
     Import a Papers 3 library to Zotero.  For more information see:
@@ -475,13 +602,17 @@ def main():
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--token",
                         help="Specify API key")
+    parser.add_argument("--pubmed-cleanup",
+                        action="append",
+                        choices=["journal", "abstract"],
+                        help="Look up and replace metadata from PubMed")
     args = parser.parse_args()
 
     papersdb_cursor = open_papersdb()
     userid = z_get_userid(args.token)
     collection_map = z_recreate_collections(args.token, userid, papersdb_cursor)
     item_map = z_recreate_items(args.token, userid, papersdb_cursor,
-            collection_map)
+            collection_map, args.pubmed_cleanup)
     z_recreate_pdfs(args.token, userid, papersdb_cursor, item_map)
 
 
