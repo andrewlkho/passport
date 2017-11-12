@@ -1,10 +1,8 @@
 Passport is a utility for transferring a library from
 [Papers 3](https://www.readcube.com/papers/) to
-[Zotero](https://www.zotero.org/).
-
-There already exist several ways of transferring a list of papers such as
-exporting to and then importing from a RIS file.  However, none of them preserve
-the collections I have sorted my papers into.
+[Zotero](https://www.zotero.org/).  There are already several methods of 
+transferring a list of papers such as using a RIS file.  However, none of them 
+preserve the collections I have sorted my papers into.
 
 Passport will:
 - Recreate your Papers 3 collections and file your papers as appropriate
@@ -12,7 +10,7 @@ Passport will:
 - Copy the PDFs to your local Zotero data storage directory
 - Optionally, pass your library through PubMed to clean up some of the metadata
   (see below)
-- Not make any changes to your Papers 3 library which it only reads data from
+- Not make any changes to your Papers 3 library
 
 As the Papers 3 sqlite library is not a documented format, I have had to reverse
 engineer the library format.  As such, I can make no guarantees that passport
@@ -42,7 +40,9 @@ satisfied.
 
 4. Run the script, passing it your API key (`<KEY>` in the command below):
 
+    ```
     % ./passport.py --token <KEY>
+    ```
 
 
 # Cleaning metadata through PubMed
