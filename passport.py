@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import argparse
+import cgi
 import ConfigParser
 import datetime
 import os
@@ -333,7 +334,7 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map, pubmed_clea
         if item["notes"] is not None:
             import_notes.append({
                 "itemType": "note",
-                "note": item["notes"],
+                "note": "<br />".join(cgi.escape(item["notes"]).split("\n")),
                 "tags": [],
                 "collections": [],
                 "relations": {},
