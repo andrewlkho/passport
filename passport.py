@@ -319,10 +319,10 @@ def z_recreate_items(token, userid, papersdb_cursor, collection_map, pubmed_clea
         for coll in coll_res.fetchall():
             # For some reason, some items in papers are assigned to a collection
             # that does not exist: put these in the top level import folder
-            if coll["uuid"] is not None:
+            if coll["uuid"] in collection_map:
                 collections.append(collection_map[coll["uuid"]])
-            else:
-                collections.append(collection_map["tld"])
+        if len(collections) == 0:
+            collections.append(collection_map["tld"])
         jsondict["collections"] = collections
 
         jsondict["relations"] = {}
